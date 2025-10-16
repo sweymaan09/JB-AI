@@ -1,12 +1,21 @@
-
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import ChatInput from './components/ChatInput';
 import { generateInteractiveLesson, generateFollowUpResponse, InteractivePrompt } from './services/geminiService';
 import FloatingSymbols from './components/FloatingSymbols';
-import { RestartIcon, PlayIcon, PauseIcon } from './components/icons';
-import { GoogleGenAI, LiveSession, LiveServerMessage, Modality, Blob } from '@google/genai';
+import { RestartIcon, PlayIcon, PauseIcon, RewindIcon, ForwardIcon } from './components/icons';
+import { GoogleGenAI, Modality } from '@google/genai';
 
 // --- Audio Encoding/Decoding Helpers ---
+function decode(base64: string): Uint8Array {
+    const binaryString = atob(base64);
+    const len = binaryString.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes;
+}
+
 function encode(bytes: Uint8Array): string {
     let binary = '';
     const len = bytes.byteLength;
@@ -16,14 +25,16 @@ function encode(bytes: Uint8Array): string {
     return btoa(binary);
 }
 
-function decode(base64: string): Uint8Array {
-    const binaryString = atob(base64);
-    const len = binaryString.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
-    }
-    return bytes;
+function createPcmBlob(data: Float32Array): { data: string; mimeType: string } {
+  const l = data.length;
+  const int16 = new Int16Array(l);
+  for (let i = 0; i < l; i++) {
+    int16[i] = data[i] * 32768;
+  }
+  return {
+    data: encode(new Uint8Array(int16.buffer)),
+    mimeType: 'audio/pcm;rate=16000',
+  };
 }
 
 async function decodePcmData(data: Uint8Array, ctx: AudioContext, sampleRate: number = 24000): Promise<AudioBuffer> {
@@ -46,7 +57,7 @@ const formatTime = (seconds: number) => {
 
 const MENTOR_IMAGE_URL = 'https://i.postimg.cc/4NkRjJkS/Whats-App-Image-2025-10-16-at-18-17-26_354dd894.jpg';
 
-type Status = 'idle' | 'thinking' | 'talking' | 'paused' | 'awaiting_answer' | 'responding' | 'listening' | 'live_connecting';
+type Status = 'idle' | 'thinking' | 'talking' | 'paused' | 'awaiting_answer' | 'responding';
 
 const Avatar = ({ status, onClick, hasAudio }: { status: Status, onClick: () => void, hasAudio: boolean }) => {
     const auraClasses: Record<Status, string> = {
@@ -56,8 +67,6 @@ const Avatar = ({ status, onClick, hasAudio }: { status: Status, onClick: () => 
         thinking: '',
         paused: 'animate-[aura-pulse_4s_infinite]',
         awaiting_answer: 'animate-[aura-pulse_4s_infinite]',
-        listening: 'animate-[talking-aura-pulse_2s_infinite]',
-        live_connecting: '',
     };
 
     const isTalking = status === 'talking' || status === 'responding';
@@ -78,8 +87,8 @@ const Avatar = ({ status, onClick, hasAudio }: { status: Status, onClick: () => 
                 className="relative z-10 w-full h-full rounded-full bg-cover bg-center border-4 border-slate-700/50 shadow-2xl brightness-110 contrast-110"
                 style={{ backgroundImage: `url(${MENTOR_IMAGE_URL})` }}
             />
-            {(status === 'thinking' || status === 'live_connecting') && (
-                <div className="absolute z-20 inset-[-10px] border-4 border-transparent border-t-yellow-300 rounded-full animate-spin"></div>
+            {status === 'thinking' && (
+                <div className="absolute z-20 inset-[-10px] border-4 border-transparent border-t-yellow-300 rounded-full custom-spin"></div>
             )}
             
             {isPlayable && (
@@ -105,8 +114,11 @@ function App() {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [currentQuestion, setCurrentQuestion] = useState<string | null>(null);
-  
-  // Refs for Lesson Mode
+  const [lessonContext, setLessonContext] = useState<{ topic: string, partNumber: number } | null>(null);
+
+  const [isCallActive, setIsCallActive] = useState(false);
+  const [callStatusMessage, setCallStatusMessage] = useState<string | null>(null);
+
   const lessonAudioContextRef = useRef<AudioContext | null>(null);
   const audioBufferRef = useRef<AudioBuffer | null>(null);
   const sourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
@@ -114,24 +126,21 @@ function App() {
   const lessonPromptsRef = useRef<InteractivePrompt[]>([]);
   const pauseTimeRef = useRef<number>(0);
   const playbackStartedAtRef = useRef<number>(0);
-  
-  // Refs for Voice Chat Mode
-  const liveSessionPromiseRef = useRef<Promise<LiveSession> | null>(null);
+
+  const liveSessionRef = useRef<any>(null);
   const inputAudioContextRef = useRef<AudioContext | null>(null);
-  const outputAudioContextRef = useRef<AudioContext | null>(null);
   const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
-  const liveAudioSources = useRef(new Set<AudioBufferSourceNode>()).current;
-  const nextStartTimeRef = useRef(0);
+  const mediaStreamSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const outputQueueRef = useRef<Set<AudioBufferSourceNode>>(new Set());
+  const nextStartTimeRef = useRef<number>(0);
   
   useEffect(() => {
-    // Initialize lesson audio context on mount
     if (!lessonAudioContextRef.current) {
         lessonAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
     }
   }, []);
 
-  // --- Lesson Mode Logic ---
   const stopPlayback = useCallback((clearState = false) => {
     if (sourceNodeRef.current) {
         sourceNodeRef.current.onended = null;
@@ -148,8 +157,19 @@ function App() {
         setDuration(0);
         setAudioBase64(null);
         lessonPromptsRef.current = [];
+        setLessonContext(null);
     }
   }, []);
+
+  const pauseAudio = useCallback(() => {
+      if (!sourceNodeRef.current || !lessonAudioContextRef.current || status !== 'talking') return;
+      const elapsedTime = lessonAudioContextRef.current.currentTime - playbackStartedAtRef.current;
+      const newPauseTime = pauseTimeRef.current + elapsedTime;
+      stopPlayback();
+      pauseTimeRef.current = newPauseTime;
+      setCurrentTime(newPauseTime);
+      setStatus('paused');
+  }, [status, stopPlayback]);
 
   const playAudio = useCallback((startTime?: number) => {
     if (!audioBufferRef.current || !lessonAudioContextRef.current) return;
@@ -168,7 +188,7 @@ function App() {
     const updateProgress = () => {
         if (!sourceNodeRef.current || !lessonAudioContextRef.current) return;
         const elapsedTime = lessonAudioContextRef.current.currentTime - playbackStartedAtRef.current;
-        const newCurrentTime = Math.min(pauseTimeRef.current + elapsedTime, duration);
+        const newCurrentTime = Math.min(pauseTimeRef.current + elapsedTime, audioBufferRef.current!.duration);
         setCurrentTime(newCurrentTime);
         if (lessonPromptsRef.current.length > 0 && newCurrentTime >= lessonPromptsRef.current[0].time_in_seconds) {
             const nextPrompt = lessonPromptsRef.current.shift();
@@ -185,121 +205,51 @@ function App() {
     source.onended = () => {
         if (sourceNodeRef.current === source) {
             stopPlayback();
+            if (lessonPromptsRef.current.length > 0) {
+                const nextPrompt = lessonPromptsRef.current.shift();
+                if (nextPrompt) {
+                    setStatus('awaiting_answer');
+                    setCurrentQuestion(nextPrompt.question);
+                    return;
+                }
+            }
             setStatus('idle');
-            setCurrentTime(duration);
+            setCurrentTime(audioBufferRef.current!.duration);
             pauseTimeRef.current = 0;
         }
     };
-  }, [duration, stopPlayback]);
+  }, [stopPlayback, pauseAudio]);
 
-  const pauseAudio = useCallback(() => {
-      if (!sourceNodeRef.current || !lessonAudioContextRef.current || status !== 'talking') return;
-      const elapsedTime = lessonAudioContextRef.current.currentTime - playbackStartedAtRef.current;
-      const newPauseTime = pauseTimeRef.current + elapsedTime;
-      stopPlayback();
-      pauseTimeRef.current = newPauseTime;
-      setCurrentTime(newPauseTime);
-      setStatus('paused');
-  }, [status, stopPlayback]);
-  
-  // --- Voice Chat Mode Logic ---
-  const stopVoiceChat = useCallback(() => {
-    if (liveSessionPromiseRef.current) {
-        liveSessionPromiseRef.current.then(session => session.close());
-        liveSessionPromiseRef.current = null;
-    }
-    if (mediaStreamRef.current) {
-        mediaStreamRef.current.getTracks().forEach(track => track.stop());
-        mediaStreamRef.current = null;
-    }
-    if(scriptProcessorRef.current) {
-        scriptProcessorRef.current.disconnect();
-        scriptProcessorRef.current = null;
-    }
-    if (inputAudioContextRef.current && inputAudioContextRef.current.state !== 'closed') {
-        inputAudioContextRef.current.close();
-        inputAudioContextRef.current = null;
-    }
-    if (outputAudioContextRef.current && outputAudioContextRef.current.state !== 'closed') {
-        outputAudioContextRef.current.close();
-        outputAudioContextRef.current = null;
-    }
-    liveAudioSources.forEach(source => source.stop());
-    liveAudioSources.clear();
-    nextStartTimeRef.current = 0;
-    setStatus('idle');
-  }, [liveAudioSources]);
-
-  const startVoiceChat = useCallback(async () => {
-    setStatus('live_connecting');
-    stopPlayback(true);
+  const continueLesson = async () => {
+    if (!lessonContext) return;
+    setStatus('thinking');
+    setCurrentQuestion(null);
+    const newContext = { ...lessonContext, partNumber: lessonContext.partNumber + 1 };
+    setLessonContext(newContext);
 
     try {
-        inputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-        outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        mediaStreamRef.current = stream;
-
-        liveSessionPromiseRef.current = ai.live.connect({
-            model: 'gemini-2.5-flash-native-audio-preview-09-2025',
-            config: {
-                responseModalities: [Modality.AUDIO],
-                speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } } },
-                systemInstruction: 'You are "JB AI" in Voice Chat Mode. Act as Jeetu Bhaiya. Be a friendly, emotional, and motivating mentor. Keep responses short, natural, and conversational in Hinglish. Listen carefully and respond quickly with empathy and humor.'
-            },
-            callbacks: {
-                onopen: () => {
-                    setStatus('listening');
-                    const source = inputAudioContextRef.current!.createMediaStreamSource(stream);
-                    const scriptProcessor = inputAudioContextRef.current!.createScriptProcessor(4096, 1, 1);
-                    scriptProcessorRef.current = scriptProcessor;
-
-                    scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
-                        const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
-                        const l = inputData.length;
-                        const int16 = new Int16Array(l);
-                        for (let i = 0; i < l; i++) { int16[i] = inputData[i] * 32768; }
-                        const pcmBlob: Blob = { data: encode(new Uint8Array(int16.buffer)), mimeType: 'audio/pcm;rate=16000' };
-                        
-                        liveSessionPromiseRef.current?.then((session) => {
-                            session.sendRealtimeInput({ media: pcmBlob });
-                        });
-                    };
-                    source.connect(scriptProcessor);
-                    scriptProcessor.connect(inputAudioContextRef.current!.destination);
-                },
-                onmessage: async (message: LiveServerMessage) => {
-                    const audioData = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
-                    if (audioData && outputAudioContextRef.current) {
-                         const outCtx = outputAudioContextRef.current;
-                         nextStartTimeRef.current = Math.max(nextStartTimeRef.current, outCtx.currentTime);
-                         const audioBuffer = await decodePcmData(decode(audioData), outCtx);
-                         const source = outCtx.createBufferSource();
-                         source.buffer = audioBuffer;
-                         source.connect(outCtx.destination);
-                         source.addEventListener('ended', () => liveAudioSources.delete(source));
-                         source.start(nextStartTimeRef.current);
-                         nextStartTimeRef.current += audioBuffer.duration;
-                         liveAudioSources.add(source);
-                    }
-                },
-                onerror: (e) => { console.error('Live session error:', e); stopVoiceChat(); },
-                onclose: () => { console.log('Live session closed.'); stopVoiceChat(); },
-            }
-        });
-
+      const { audioBase64, interactivePrompts } = await generateInteractiveLesson(
+        '', undefined, newContext
+      );
+      setAudioBase64(audioBase64);
+      lessonPromptsRef.current = [...interactivePrompts].sort((a, b) => a.time_in_seconds - b.time_in_seconds);
+      const audioContext = lessonAudioContextRef.current!;
+      const buffer = await decodePcmData(decode(audioBase64), audioContext);
+      audioBufferRef.current = buffer;
+      setDuration(buffer.duration);
+      playAudio(0);
     } catch (error) {
-        console.error('Failed to start voice chat:', error);
-        stopVoiceChat();
+      console.error('Error continuing lesson:', error);
+      setStatus('idle');
     }
-  }, [stopVoiceChat, stopPlayback, liveAudioSources]);
-  
-  // --- Core Handlers ---
+  };
+
   const startNewLesson = async (text: string, file?: File) => {
     setStatus('thinking');
     stopPlayback(true);
-    stopVoiceChat();
     setCurrentQuestion(null);
+    const newContext = { topic: text || file?.name || 'the uploaded content', partNumber: 1 };
+    setLessonContext(newContext);
 
     try {
       const { audioBase64, interactivePrompts } = await generateInteractiveLesson(text, file);
@@ -314,6 +264,7 @@ function App() {
     } catch (error) {
       console.error('Error generating lesson:', error);
       setStatus('idle');
+      setLessonContext(null);
     }
   };
 
@@ -330,40 +281,177 @@ function App() {
         source.start();
         source.onended = () => {
             setCurrentQuestion(null);
-            playAudio();
+            continueLesson();
         };
     } catch (error) {
         console.error('Error generating follow-up:', error);
         setCurrentQuestion(null);
-        playAudio();
+        continueLesson();
     }
   };
 
   const handleSend = async (text: string, file?: File) => {
-    if ((!text.trim() && !file) || status === 'listening') return;
+    if (!text.trim() && !file) return;
+
     if (status === 'awaiting_answer') {
-      await handleUserAnswer(text);
-    } else {
-      await startNewLesson(text, file);
+        await handleUserAnswer(text);
+        return;
     }
+
+    await startNewLesson(text, file);
   };
   
   const handleAvatarClick = () => {
+    if (isCallActive) return;
     if (status === 'talking' || status === 'responding') {
         pauseAudio();
     } else if ((status === 'idle' || status === 'paused') && audioBase64) {
         playAudio();
     }
   }
+  
+  const handleSeek = useCallback((offset: number) => {
+    if (!audioBufferRef.current || !lessonAudioContextRef.current) return;
+    const newTime = Math.max(0, Math.min(currentTime + offset, audioBufferRef.current.duration));
+    setCurrentTime(newTime);
+    pauseTimeRef.current = newTime;
+    
+    if (status === 'talking' || status === 'paused') {
+        playAudio(newTime);
+    }
+  }, [currentTime, status, playAudio]);
 
-  const handleMicClick = () => {
-    if (status === 'listening' || status === 'live_connecting') {
-      stopVoiceChat();
+  const endCall = useCallback(() => {
+    setStatus('idle');
+    setIsCallActive(false);
+    setCallStatusMessage("Call ended.");
+    setTimeout(() => setCallStatusMessage(null), 2000);
+
+    if (micStreamRef.current) {
+        micStreamRef.current.getTracks().forEach(track => track.stop());
+        micStreamRef.current = null;
+    }
+    if (mediaStreamSourceRef.current) {
+        mediaStreamSourceRef.current.disconnect();
+        mediaStreamSourceRef.current = null;
+    }
+    if (scriptProcessorRef.current) {
+        scriptProcessorRef.current.disconnect();
+        scriptProcessorRef.current.onaudioprocess = null;
+        scriptProcessorRef.current = null;
+    }
+    if (inputAudioContextRef.current && inputAudioContextRef.current.state !== 'closed') {
+        inputAudioContextRef.current.close();
+        inputAudioContextRef.current = null;
+    }
+    if (liveSessionRef.current) {
+        try { liveSessionRef.current.close(); } catch(e) {}
+        liveSessionRef.current = null;
+    }
+    for (const source of outputQueueRef.current) {
+        try { source.stop(); } catch(e) {}
+    }
+    outputQueueRef.current.clear();
+    nextStartTimeRef.current = 0;
+  }, []);
+
+  const startCall = useCallback(async () => {
+    setStatus('thinking');
+    setCallStatusMessage("Connecting...");
+    stopPlayback(true);
+
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        micStreamRef.current = stream;
+
+        if (!lessonAudioContextRef.current || lessonAudioContextRef.current.state === 'closed') {
+            lessonAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+        }
+        const outputAudioContext = lessonAudioContextRef.current;
+        if(outputAudioContext.state === 'suspended') outputAudioContext.resume();
+        
+        inputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+        
+        const sessionPromise = ai.live.connect({
+            model: 'gemini-2.5-flash-native-audio-preview-09-2025',
+            callbacks: {
+                onopen: () => {
+                    setStatus('talking');
+                    setIsCallActive(true);
+                    setCallStatusMessage("Connected! You can start talking.");
+
+                    const source = inputAudioContextRef.current!.createMediaStreamSource(stream);
+                    mediaStreamSourceRef.current = source;
+                    
+                    const scriptProcessor = inputAudioContextRef.current!.createScriptProcessor(4096, 1, 1);
+                    scriptProcessorRef.current = scriptProcessor;
+
+                    scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
+                        const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
+                        const pcmBlob = createPcmBlob(inputData);
+                        sessionPromise.then((session) => {
+                           session.sendRealtimeInput({ media: pcmBlob });
+                        });
+                    };
+                    
+                    source.connect(scriptProcessor);
+                    scriptProcessor.connect(inputAudioContextRef.current!.destination);
+                },
+                onmessage: async (message) => {
+                    const audioData = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
+                    if (audioData) {
+                        nextStartTimeRef.current = Math.max(nextStartTimeRef.current, outputAudioContext.currentTime);
+                        const audioBuffer = await decodePcmData(decode(audioData), outputAudioContext, 24000);
+                        const sourceNode = outputAudioContext.createBufferSource();
+                        sourceNode.buffer = audioBuffer;
+                        sourceNode.connect(outputAudioContext.destination);
+                        sourceNode.addEventListener('ended', () => { outputQueueRef.current.delete(sourceNode); });
+                        sourceNode.start(nextStartTimeRef.current);
+                        nextStartTimeRef.current += audioBuffer.duration;
+                        outputQueueRef.current.add(sourceNode);
+                    }
+                    if (message.serverContent?.interrupted) {
+                        for (const source of outputQueueRef.current) { source.stop(); }
+                        outputQueueRef.current.clear();
+                        nextStartTimeRef.current = 0;
+                    }
+                },
+                onerror: (e) => {
+                    console.error('Live session error:', e);
+                    setCallStatusMessage("An error occurred. Please try again.");
+                    endCall();
+                },
+                onclose: (e) => {
+                    if (isCallActive) {
+                       endCall();
+                    }
+                },
+            },
+            config: {
+                responseModalities: [Modality.AUDIO],
+                speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } } },
+                systemInstruction: 'You are JB AI, a friendly and motivating mentor like Jeetu Bhaiya from Kota Factory. Engage in a natural, warm, and supportive Hinglish conversation. Treat the user like a younger sibling.'
+            },
+        });
+        
+        liveSessionRef.current = await sessionPromise;
+
+    } catch (error) {
+        console.error('Failed to start call:', error);
+        setStatus('idle');
+        setCallStatusMessage("Couldn't start the call. Check microphone permissions.");
+        endCall();
+    }
+  }, [endCall, stopPlayback, isCallActive]);
+
+  const handleCallToggle = () => {
+    if (isCallActive) {
+        endCall();
     } else {
-      startVoiceChat();
+        startCall();
     }
   };
-  
+
   return (
     <div className="h-screen w-screen bg-gradient-to-b from-[#02042b] via-[#010218] to-[#010218] text-white font-sans overflow-hidden relative flex flex-col">
       <div className="absolute inset-0 z-0 overflow-hidden" aria-hidden="true">
@@ -377,30 +465,36 @@ function App() {
             🌟 JB AI - YOUR PERSONAL JEETU BHAIYA 🌟
         </h1>
 
-        <div className="my-8 flex items-center justify-center gap-4">
+        <div className="my-8 flex flex-col items-center justify-center gap-4">
             <Avatar status={status} onClick={handleAvatarClick} hasAudio={!!audioBase64} />
-            {audioBase64 && status !== 'thinking' && status !== 'listening' && (
-                <button 
-                    onClick={() => playAudio(0)} 
-                    className="p-3 bg-slate-800/70 rounded-full text-cyan-300 hover:bg-slate-700 transition-colors self-end -ml-12 mb-2"
-                    aria-label="Restart lesson"
-                >
-                    <RestartIcon className="w-6 h-6" />
-                </button>
+            {audioBase64 && status !== 'thinking' && !isCallActive && (
+                <div className="flex items-center gap-6 -mt-4">
+                    <button onClick={() => handleSeek(-10)} className="p-3 bg-slate-800/70 rounded-full text-cyan-300 hover:bg-slate-700 transition-colors" aria-label="Rewind 10 seconds">
+                        <RewindIcon className="w-6 h-6" />
+                    </button>
+                    <button onClick={() => { stopPlayback(false); playAudio(0); }} className="p-4 bg-slate-800/70 rounded-full text-cyan-300 hover:bg-slate-700 transition-colors" aria-label="Restart lesson">
+                        <RestartIcon className="w-8 h-8" />
+                    </button>
+                    <button onClick={() => handleSeek(10)} className="p-3 bg-slate-800/70 rounded-full text-cyan-300 hover:bg-slate-700 transition-colors" aria-label="Forward 10 seconds">
+                        <ForwardIcon className="w-6 h-6" />
+                    </button>
+                </div>
             )}
         </div>
         
-        <div className="h-24 max-w-2xl flex items-center justify-center">
+        <div className="h-24 max-w-2xl flex items-center justify-center p-4">
             <p className="font-handwriting text-2xl md:text-3xl text-cyan-200 quote-glow">
-                {status === 'awaiting_answer' 
+                {callStatusMessage
+                 ? `🎤 ${callStatusMessage}`
+                 : (status === 'awaiting_answer')
                  ? `🤔 ${currentQuestion}`
-                 : "💬 “Dreams dekhe jaate hain, aims achieve kiye jaate hain.”"
+                 : "💬 “Don’t say dreams, say aim — dreams dekhe jaate hain, aims achieve kiye jaate hain.”"
                 }
             </p>
         </div>
         
-        {audioBase64 && status !== 'thinking' && status !== 'listening' && status !== 'live_connecting' && (
-            <div className="w-full max-w-md p-2 mt-2">
+        {audioBase64 && status !== 'thinking' && !isCallActive && (
+            <div className="w-full max-w-md p-2 -mt-4">
                 <div className="flex items-center gap-3 text-sm text-gray-400">
                     <span>{formatTime(currentTime)}</span>
                     <input
@@ -410,9 +504,15 @@ function App() {
                         value={currentTime}
                         onChange={(e) => {
                             const newTime = parseFloat(e.target.value);
-                            pauseTimeRef.current = newTime;
                             setCurrentTime(newTime);
-                            if (status !== 'talking') {
+                            pauseTimeRef.current = newTime;
+                            if (status === 'paused') {
+                                playAudio(newTime);
+                            }
+                        }}
+                        onMouseUp={(e) => {
+                            if (status === 'talking') {
+                                const newTime = parseFloat((e.target as HTMLInputElement).value);
                                 playAudio(newTime);
                             }
                         }}
@@ -428,9 +528,9 @@ function App() {
       <div className="relative z-10 flex-shrink-0">
         <ChatInput 
             onSend={handleSend} 
-            isLoading={status === 'thinking' || status === 'responding' || status === 'live_connecting'}
-            onMicClick={handleMicClick}
-            isRecording={status === 'listening'}
+            isLoading={status === 'thinking' || status === 'responding'}
+            isCallActive={isCallActive}
+            onCallToggle={handleCallToggle}
         />
       </div>
     </div>

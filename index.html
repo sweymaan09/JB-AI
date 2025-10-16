@@ -62,6 +62,14 @@
       .caption-line {
         animation: caption-fade-in 0.5s ease-out forwards;
       }
+      
+      @keyframes custom-spin-animation {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+      }
+      .custom-spin {
+        animation: custom-spin-animation 1s linear infinite;
+      }
     </style>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

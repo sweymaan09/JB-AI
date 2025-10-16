@@ -1,7 +1,6 @@
 {
   "description": "JB AI - A warm, witty, and deeply humanlike mentor who makes learning fun, emotional, and crystal-clear.",
   "requestFramePermissions": [
-    "camera",
     "microphone"
   ],
   "name": "JB AI"
