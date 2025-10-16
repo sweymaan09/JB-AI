@@ -1,3 +1,4 @@
+
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import ChatInput from './components/ChatInput';
 import { generateInteractiveLesson, generateFollowUpResponse, InteractivePrompt } from './services/geminiService';
@@ -104,7 +105,6 @@ function App() {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [currentQuestion, setCurrentQuestion] = useState<string | null>(null);
-  const [liveTranscription, setLiveTranscription] = useState<{user: string, model: string}>({user: '', model: ''});
   
   // Refs for Lesson Mode
   const lessonAudioContextRef = useRef<AudioContext | null>(null);
@@ -228,13 +228,11 @@ function App() {
     liveAudioSources.clear();
     nextStartTimeRef.current = 0;
     setStatus('idle');
-    setLiveTranscription({ user: '', model: '' });
   }, [liveAudioSources]);
 
   const startVoiceChat = useCallback(async () => {
     setStatus('live_connecting');
     stopPlayback(true);
-    setLiveTranscription({ user: '', model: '' });
 
     try {
         inputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
@@ -246,8 +244,6 @@ function App() {
             model: 'gemini-2.5-flash-native-audio-preview-09-2025',
             config: {
                 responseModalities: [Modality.AUDIO],
-                inputAudioTranscription: {},
-                outputAudioTranscription: {},
                 speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } } },
                 systemInstruction: 'You are "JB AI" in Voice Chat Mode. Act as Jeetu Bhaiya. Be a friendly, emotional, and motivating mentor. Keep responses short, natural, and conversational in Hinglish. Listen carefully and respond quickly with empathy and humor.'
             },
@@ -273,19 +269,8 @@ function App() {
                     scriptProcessor.connect(inputAudioContextRef.current!.destination);
                 },
                 onmessage: async (message: LiveServerMessage) => {
-                    let currentModelTranscription = '';
-                    if (message.serverContent?.outputTranscription) {
-                        currentModelTranscription += message.serverContent.outputTranscription.text;
-                    }
-                    if (message.serverContent?.inputTranscription) {
-                        setLiveTranscription(prev => ({ ...prev, user: prev.user + message.serverContent!.inputTranscription!.text }));
-                    }
-                    if (message.serverContent?.turnComplete) {
-                        setLiveTranscription({ user: '', model: '' });
-                    }
-                    const audioData = message.serverContent?.modelTurn?.parts[0]?.inlineData.data;
+                    const audioData = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
                     if (audioData && outputAudioContextRef.current) {
-                         setLiveTranscription(prev => ({ ...prev, model: prev.model + currentModelTranscription }));
                          const outCtx = outputAudioContextRef.current;
                          nextStartTimeRef.current = Math.max(nextStartTimeRef.current, outCtx.currentTime);
                          const audioBuffer = await decodePcmData(decode(audioData), outCtx);
@@ -405,20 +390,13 @@ function App() {
             )}
         </div>
         
-        <div className="h-24 max-w-2xl">
-        {status === 'listening' || status === 'live_connecting' ? (
-             <div className="font-sans text-xl md:text-2xl text-slate-300 p-2 min-h-[4rem]">
-                <p><span className="font-bold text-cyan-300">You: </span>{liveTranscription.user}</p>
-                <p><span className="font-bold text-yellow-300">JB: </span>{liveTranscription.model}</p>
-            </div>
-        ) : (
+        <div className="h-24 max-w-2xl flex items-center justify-center">
             <p className="font-handwriting text-2xl md:text-3xl text-cyan-200 quote-glow">
                 {status === 'awaiting_answer' 
                  ? `🤔 ${currentQuestion}`
                  : "💬 “Dreams dekhe jaate hain, aims achieve kiye jaate hain.”"
                 }
             </p>
-        )}
         </div>
         
         {audioBase64 && status !== 'thinking' && status !== 'listening' && status !== 'live_connecting' && (
