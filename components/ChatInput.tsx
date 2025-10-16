@@ -1,13 +1,14 @@
-
 import React, { useRef, useState } from 'react';
-import { SendIcon, PaperclipIcon } from './icons';
+import { SendIcon, PaperclipIcon, MicIcon } from './icons';
 
 interface ChatInputProps {
     onSend: (text: string, file?: File) => void;
     isLoading: boolean;
+    onMicClick: () => void;
+    isRecording: boolean;
 }
 
-const ChatInput: React.FC<ChatInputProps> = ({ onSend, isLoading }) => {
+const ChatInput: React.FC<ChatInputProps> = ({ onSend, isLoading, onMicClick, isRecording }) => {
     const [text, setText] = useState('');
     const [file, setFile] = useState<File | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -30,11 +31,11 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, isLoading }) => {
     };
 
     return (
-        <div className="p-4 bg-white border-t border-gray-200">
+        <div className="p-4 bg-gradient-to-t from-black/60 to-transparent backdrop-blur-sm border-t border-purple-400/20">
             {file && (
-                <div className="mb-2 p-2 bg-gray-100 rounded-md text-sm text-gray-700">
+                <div className="mb-2 p-2 bg-purple-950/50 rounded-md text-sm text-gray-300">
                     Attached: {file.name}
-                    <button onClick={() => setFile(null)} className="ml-2 text-red-500 font-bold">x</button>
+                    <button onClick={() => setFile(null)} className="ml-2 text-red-400 font-bold">x</button>
                 </div>
             )}
             <div className="flex items-center gap-2">
@@ -44,8 +45,9 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, isLoading }) => {
                     onChange={handleFileChange}
                     className="hidden"
                     id="file-upload"
+                    disabled={isRecording || isLoading}
                 />
-                <label htmlFor="file-upload" className="p-2 text-gray-500 hover:text-primary cursor-pointer transition-colors" aria-label="Attach file">
+                <label htmlFor="file-upload" className={`p-2 text-gray-400 ${isRecording ? 'cursor-not-allowed text-gray-600' : 'hover:text-purple-400 cursor-pointer'} transition-colors`} aria-label="Attach file">
                     <PaperclipIcon />
                 </label>
                 <textarea
@@ -57,15 +59,23 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, isLoading }) => {
                             handleSend();
                         }
                     }}
-                    placeholder="Ask JB AI anything..."
-                    className="flex-grow p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary resize-none"
+                    placeholder={isRecording ? "Listening..." : "Ask JB AI anything..."}
+                    className="flex-grow p-2 bg-slate-900/50 border border-purple-800 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 resize-none"
                     rows={1}
-                    disabled={isLoading}
+                    disabled={isLoading || isRecording}
                 />
+                 <button
+                    onClick={onMicClick}
+                    disabled={isLoading}
+                    className={`p-3 rounded-lg transition-colors ${isRecording ? 'bg-red-600 text-white animate-pulse' : 'bg-green-600 text-white hover:bg-green-500'} disabled:bg-gray-500 disabled:cursor-not-allowed`}
+                    aria-label={isRecording ? "Stop listening" : "Start listening"}
+                >
+                    <MicIcon />
+                </button>
                 <button
                     onClick={handleSend}
-                    disabled={isLoading || (!text.trim() && !file)}
-                    className="p-3 bg-primary text-white rounded-lg disabled:bg-gray-400 disabled:cursor-not-allowed hover:bg-blue-600 transition-colors"
+                    disabled={isLoading || (!text.trim() && !file) || isRecording}
+                    className="p-3 bg-purple-600 text-white rounded-lg disabled:bg-gray-500 disabled:cursor-not-allowed hover:bg-purple-500 transition-colors"
                     aria-label="Send message"
                 >
                     <SendIcon />
