@@ -1,9 +1,9 @@
-
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import ChatInterface from './components/ChatInterface';
 import { Message } from './types';
-import { generateJbAiResponse, generateSpeech } from './services/geminiService';
+import { createJbAiChatSession, continueJbAiChat, generateSpeech } from './services/geminiService';
 import { fileToBase64 } from './utils/fileUtils';
+import { Chat } from '@google/genai';
 
 const App: React.FC = () => {
     const [messages, setMessages] = useState<Message[]>([
@@ -14,8 +14,36 @@ const App: React.FC = () => {
         }
     ]);
     const [isLoading, setIsLoading] = useState(false);
+    const [chat, setChat] = useState<Chat | null>(null);
+
+    // Initialize the chat session on component mount
+    useEffect(() => {
+        try {
+            const chatSession = createJbAiChatSession();
+            setChat(chatSession);
+        } catch (error) {
+            console.error("Failed to initialize chat session:", error);
+             const errorMessage: Message = {
+                id: 'init-error',
+                sender: 'ai',
+                text: "Oh ho, lagta hai connection mein kuch gadbad hai. Please refresh and try again.",
+            };
+            setMessages((prev) => [...prev, errorMessage]);
+        }
+    }, []);
 
     const handleSend = async (text: string, file?: File) => {
+        if (!chat) {
+            console.error("Chat is not initialized.");
+            const errorMessage: Message = {
+                id: (Date.now() + 1).toString(),
+                sender: 'ai',
+                text: "Apologies, the chat session isn't ready. Please refresh the page.",
+            };
+            setMessages((prev) => [...prev, errorMessage]);
+            return;
+        }
+
         setIsLoading(true);
 
         const userMessage: Message = {
@@ -32,9 +60,12 @@ const App: React.FC = () => {
                 filePayload = { base64, mimeType: file.type };
             }
             
-            const { text: aiText, structuredResponse } = await generateJbAiResponse(text, filePayload);
+            const { text: aiText, structuredResponse } = await continueJbAiChat(chat, text, filePayload);
             
-            const audioBase64 = await generateSpeech(structuredResponse.voice_script_ssml);
+            let audioBase64;
+            if (structuredResponse?.voice_script_ssml) {
+                audioBase64 = await generateSpeech(structuredResponse.voice_script_ssml);
+            }
 
             const aiMessage: Message = {
                 id: (Date.now() + 1).toString(),
